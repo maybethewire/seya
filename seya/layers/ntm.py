@@ -7,7 +7,7 @@ floatX = theano.config.floatX
 from keras.layers.recurrent import Recurrent, GRU, LSTM
 from keras import backend as K
 
-from seya.utils import rnn_states
+#from seya.utils import rnn_states
 tol = 1e-4
 
 
@@ -91,7 +91,8 @@ class NeuralTuringMachine(Recurrent):
     def __init__(self, output_dim, n_slots, m_length, shift_range=3,
                  inner_rnn='gru',
                  init='glorot_uniform', inner_init='orthogonal',
-                 input_dim=None, input_length=None, **kwargs):
+                 **kwargs):
+
         self.output_dim = output_dim
         self.n_slots = n_slots
         self.m_length = m_length
@@ -99,22 +100,20 @@ class NeuralTuringMachine(Recurrent):
         self.init = init
         self.inner_init = inner_init
         self.inner_rnn = inner_rnn
+        self.rnn = None
 
-        self.input_dim = input_dim
-        self.input_length = input_length
-        if self.input_dim:
-            kwargs['input_shape'] = (self.input_length, self.input_dim)
         super(NeuralTuringMachine, self).__init__(**kwargs)
 
-    def build(self):
-        input_leng, input_dim = self.input_shape[1:]
-        self.input = T.tensor3()
+    def build(self, input_shape):
+        print input_shape
+        input_leng, input_dim = input_shape[1:]
 
         if self.inner_rnn == 'gru':
             self.rnn = GRU(
                 activation='relu',
                 input_dim=input_dim+self.m_length,
                 input_length=input_leng,
+                consume_less='gpu',  # does not work otherwise
                 output_dim=self.output_dim, init=self.init,
                 inner_init=self.inner_init)
         elif self.inner_rnn == 'lstm':
@@ -122,12 +121,15 @@ class NeuralTuringMachine(Recurrent):
                 input_dim=input_dim+self.m_length,
                 input_length=input_leng,
                 output_dim=self.output_dim, init=self.init,
+                consume_less='gpu',  # does not work otherwise
                 forget_bias_init='zero',
                 inner_init=self.inner_init)
         else:
             raise ValueError('this inner_rnn is not implemented yet.')
 
-        self.rnn.build()
+        if not self.rnn.built:
+            rnn_input_shape = (None, input_leng, input_dim+self.m_length)
+            self.rnn.build(rnn_input_shape)
 
         # initial memory, state, read and write vecotrs
         self.M = theano.shared((.001*np.ones((1,)).astype(floatX)))
@@ -175,6 +177,8 @@ class NeuralTuringMachine(Recurrent):
             self.init_c = K.zeros((self.output_dim))
             self.trainable_weights = self.trainable_weights + [self.init_c, ]
 
+        super(NeuralTuringMachine, self).build(input_shape)
+
     def _read(self, w, M):
         return (w[:, :, None]*M).sum(axis=1)
 
@@ -220,55 +224,6 @@ class NeuralTuringMachine(Recurrent):
         else:
             return [init_M, T.nnet.softmax(init_wr), T.nnet.softmax(init_ww),
                     init_h]
-
-    @property
-    def output_shape(self):
-        input_shape = self.input_shape
-        if self.return_sequences:
-            return input_shape[0], input_shape[1], self.output_dim
-        else:
-            return input_shape[0], self.output_dim
-
-    def get_full_output(self, train=False):
-        """
-        This method is for research and visualization purposes. Use it as
-        X = model.get_input()  # full model
-        Y = ntm.get_output()    # this layer
-        F = theano.function([X], Y, allow_input_downcast=True)
-        [memory, read_address, write_address, rnn_state] = F(x)
-
-        if inner_rnn == "lstm" use it as
-        [memory, read_address, write_address, rnn_cell, rnn_state] = F(x)
-
-        """
-        # input shape: (nb_samples, time (padded with zeros), input_dim)
-        X = self.get_input(train)
-        assert K.ndim(X) == 3
-        if K._BACKEND == 'tensorflow':
-            if not self.input_shape[1]:
-                raise Exception('When using TensorFlow, you should define ' +
-                                'explicitely the number of timesteps of ' +
-                                'your sequences. Make sure the first layer ' +
-                                'has a "batch_input_shape" argument ' +
-                                'including the samples axis.')
-
-        mask = self.get_output_mask(train)
-        if mask:
-            # apply mask
-            X *= K.cast(K.expand_dims(mask), X.dtype)
-            masking = True
-        else:
-            masking = False
-
-        if self.stateful:
-            initial_states = self.states
-        else:
-            initial_states = self.get_initial_states(X)
-
-        states = rnn_states(self.step, X, initial_states,
-                            go_backwards=self.go_backwards,
-                            masking=masking)
-        return states
 
     def step(self, x, states):
         M_tm1, wr_tm1, ww_tm1 = states[:3]
